@@ -5,7 +5,7 @@
 namespace chainbase {
 
 constexpr size_t header_size = 1024;
-constexpr uint64_t header_id = 0x3242444f49534f45ULL; //"SYSIODB2" little endian
+constexpr uint64_t header_id = 0x535953494F444233ULL; //"SYSIODB3" little endian
 
 struct environment  {
    environment() {
@@ -56,10 +56,10 @@ struct environment  {
    uint8_t reserved[512] = {};
    char compiler[256] = {};
 
-   bool operator==(const environment& other) {
+   bool operator==(const environment& other) const {
       return !memcmp(this, &other, sizeof(environment));
    } 
-   bool operator!=(const environment& other) {
+   bool operator!=(const environment& other) const {
       return !(*this == other);
    }
 } __attribute__ ((packed));

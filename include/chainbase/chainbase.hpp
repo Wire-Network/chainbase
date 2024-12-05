@@ -15,7 +15,6 @@
 
 #include <boost/chrono.hpp>
 #include <boost/config.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/throw_exception.hpp>
 
@@ -37,18 +36,9 @@
    #define CHAINBASE_NUM_RW_LOCKS 10
 #endif
 
-#ifdef CHAINBASE_CHECK_LOCKING
-   #define CHAINBASE_REQUIRE_READ_LOCK(m, t) require_read_lock(m, typeid(t).name())
-   #define CHAINBASE_REQUIRE_WRITE_LOCK(m, t) require_write_lock(m, typeid(t).name())
-#else
-   #define CHAINBASE_REQUIRE_READ_LOCK(m, t)
-   #define CHAINBASE_REQUIRE_WRITE_LOCK(m, t)
-#endif
-
 namespace chainbase {
 
    namespace bip = boost::interprocess;
-   namespace bfs = boost::filesystem;
    using std::unique_ptr;
    using std::vector;
 
@@ -172,7 +162,7 @@ namespace chainbase {
          virtual uint32_t type_id()const  = 0;
          virtual uint64_t row_count()const = 0;
          virtual const std::string& type_name()const = 0;
-         virtual std::pair<int64_t, int64_t> undo_stack_revision_range()const = 0;
+         virtual std::pair<uint64_t, uint64_t> undo_stack_revision_range()const = 0;
 
          virtual void remove_object( int64_t id ) = 0;
 
@@ -199,7 +189,7 @@ namespace chainbase {
          virtual uint32_t type_id()const override { return BaseIndex::value_type::type_id; }
          virtual uint64_t row_count()const override { return _base.indices().size(); }
          virtual const std::string& type_name() const override { return BaseIndex_name; }
-         virtual std::pair<int64_t, int64_t> undo_stack_revision_range()const override { return _base.undo_stack_revision_range(); }
+         virtual std::pair<uint64_t, uint64_t> undo_stack_revision_range()const override { return _base.undo_stack_revision_range(); }
 
          virtual void     remove_object( int64_t id ) override { return _base.remove_object( id ); }
       private:
@@ -259,30 +249,13 @@ namespace chainbase {
 
          using database_index_row_count_multiset = std::multiset<std::pair<unsigned, std::string>>;
 
-         database(const bfs::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0, bool allow_dirty = false,
-                  pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped);
+         database(const std::filesystem::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0,
+                  bool allow_dirty = false, pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped);
          ~database();
          database(database&&) = default;
          database& operator=(database&&) = default;
          bool is_read_only() const { return _read_only; }
          void flush();
-         void set_require_locking( bool enable_require_locking );
-
-#ifdef CHAINBASE_CHECK_LOCKING
-         void require_lock_fail( const char* method, const char* lock_type, const char* tname )const;
-
-         void require_read_lock( const char* method, const char* tname )const
-         {
-            if( BOOST_UNLIKELY( _enable_require_locking & _read_only & (_read_lock_count <= 0) ) )
-               require_lock_fail(method, "read", tname);
-         }
-
-         void require_write_lock( const char* method, const char* tname )
-         {
-            if( BOOST_UNLIKELY( _enable_require_locking & (_write_lock_count <= 0) ) )
-               require_lock_fail(method, "write", tname);
-         }
-#endif
 
          struct session {
             public:
@@ -335,7 +308,9 @@ namespace chainbase {
 
          void set_revision( uint64_t revision )
          {
-             CHAINBASE_REQUIRE_WRITE_LOCK( "set_revision", uint64_t );
+             if ( _read_only_mode ) {
+                BOOST_THROW_EXCEPTION( std::logic_error( "attempting to set revision in read-only mode" ) );
+             }
              for( auto i : _index_list ) i->set_revision( revision );
          }
 
@@ -424,7 +399,6 @@ namespace chainbase {
          template<typename MultiIndexType>
          const generic_index<MultiIndexType>& get_index()const
          {
-            CHAINBASE_REQUIRE_READ_LOCK("get_index", typename MultiIndexType::value_type);
             typedef generic_index<MultiIndexType> index_type;
             typedef index_type*                   index_type_ptr;
             assert( _index_map.size() > index_type::value_type::type_id );
@@ -435,7 +409,6 @@ namespace chainbase {
          template<typename MultiIndexType, typename ByIndex>
          auto get_index()const -> decltype( ((generic_index<MultiIndexType>*)( nullptr ))->indices().template get<ByIndex>() )
          {
-            CHAINBASE_REQUIRE_READ_LOCK("get_index", typename MultiIndexType::value_type);
             typedef generic_index<MultiIndexType> index_type;
             typedef index_type*                   index_type_ptr;
             assert( _index_map.size() > index_type::value_type::type_id );
@@ -446,7 +419,9 @@ namespace chainbase {
          template<typename MultiIndexType>
          generic_index<MultiIndexType>& get_mutable_index()
          {
-            CHAINBASE_REQUIRE_WRITE_LOCK("get_mutable_index", typename MultiIndexType::value_type);
+            if ( _read_only_mode ) {
+               BOOST_THROW_EXCEPTION( std::logic_error( "attempting to get mutable index in read-only mode" ) );
+            }
             typedef generic_index<MultiIndexType> index_type;
             typedef index_type*                   index_type_ptr;
             assert( _index_map.size() > index_type::value_type::type_id );
@@ -457,7 +432,6 @@ namespace chainbase {
          template< typename ObjectType, typename IndexedByType, typename CompatibleKey >
          const ObjectType* find( CompatibleKey&& key )const
          {
-             CHAINBASE_REQUIRE_READ_LOCK("find", ObjectType);
              typedef typename get_index_type< ObjectType >::type index_type;
              const auto& idx = get_index< index_type >().indices().template get< IndexedByType >();
              auto itr = idx.find( std::forward< CompatibleKey >( key ) );
@@ -468,7 +442,6 @@ namespace chainbase {
          template< typename ObjectType >
          const ObjectType* find( oid< ObjectType > key = oid< ObjectType >() ) const
          {
-             CHAINBASE_REQUIRE_READ_LOCK("find", ObjectType);
              typedef typename get_index_type< ObjectType >::type index_type;
              return get_index< index_type >().find( key );
          }
@@ -476,7 +449,6 @@ namespace chainbase {
          template< typename ObjectType, typename IndexedByType, typename CompatibleKey >
          const ObjectType& get( CompatibleKey&& key )const
          {
-             CHAINBASE_REQUIRE_READ_LOCK("get", ObjectType);
              auto obj = find< ObjectType, IndexedByType >( std::forward< CompatibleKey >( key ) );
              if( !obj ) {
                 std::stringstream ss;
@@ -489,7 +461,6 @@ namespace chainbase {
          template< typename ObjectType >
          const ObjectType& get( const oid< ObjectType >& key = oid< ObjectType >() )const
          {
-             CHAINBASE_REQUIRE_READ_LOCK("get", ObjectType);
              auto obj = find< ObjectType >( key );
              if( !obj ) {
                 std::stringstream ss;
@@ -502,7 +473,9 @@ namespace chainbase {
          template<typename ObjectType, typename Modifier>
          void modify( const ObjectType& obj, Modifier&& m )
          {
-             CHAINBASE_REQUIRE_WRITE_LOCK("modify", ObjectType);
+             if ( _read_only_mode ) {
+                BOOST_THROW_EXCEPTION( std::logic_error( "attempting to modify a record in read-only mode" ) );
+             }
              typedef typename get_index_type<ObjectType>::type index_type;
              get_mutable_index<index_type>().modify( obj, m );
          }
@@ -510,7 +483,9 @@ namespace chainbase {
          template<typename ObjectType>
          void remove( const ObjectType& obj )
          {
-             CHAINBASE_REQUIRE_WRITE_LOCK("remove", ObjectType);
+             if ( _read_only_mode ) {
+                BOOST_THROW_EXCEPTION( std::logic_error( "attempting to remove a record in read-only mode" ) );
+             }
              typedef typename get_index_type<ObjectType>::type index_type;
              return get_mutable_index<index_type>().remove( obj );
          }
@@ -518,7 +493,9 @@ namespace chainbase {
          template<typename ObjectType, typename Constructor>
          const ObjectType& create( Constructor&& con )
          {
-             CHAINBASE_REQUIRE_WRITE_LOCK("create", ObjectType);
+             if ( _read_only_mode ) {
+                BOOST_THROW_EXCEPTION( std::logic_error( "attempting to create a record in read-only mode" ) );
+             }
              typedef typename get_index_type<ObjectType>::type index_type;
              return get_mutable_index<index_type>().emplace( std::forward<Constructor>(con) );
          }
@@ -533,9 +510,33 @@ namespace chainbase {
             return ret;
          }
 
+         void set_read_only_mode() {
+            _read_only_mode = true;
+         }
+
+         void unset_read_only_mode() {
+             if ( _read_only )
+                BOOST_THROW_EXCEPTION( std::logic_error( "attempting to unset read_only_mode while database was opened as read only" ) );
+            _read_only_mode = false;
+         }
+
+         size_t check_memory_and_flush_if_needed() {
+            return _db_file.check_memory_and_flush_if_needed();
+         }
+
       private:
          pinnable_mapped_file                                        _db_file;
          bool                                                        _read_only = false;
+
+         /**
+          * _read_only_mode is dynamic which can be toggled back and for
+          * by users, while _read_only is static throughout the lifetime
+          * of the database instance. When _read_only_mode is set to true,
+          * an exception is thrown when modification attempt is made on
+          * chainbase. This ensures state is not modified by mistake when
+          * application does not intend to change state.
+          */
+         bool                                                        _read_only_mode = false;
 
          /**
           * This is a sparse list of known indices kept to accelerate creation of undo sessions
@@ -546,12 +547,6 @@ namespace chainbase {
           * This is a full map (size 2^16) of all possible index designed for constant time lookup
           */
          vector<unique_ptr<abstract_index>>                          _index_map;
-
-#ifdef CHAINBASE_CHECK_LOCKING
-         int32_t                                                     _read_lock_count = 0;
-         int32_t                                                     _write_lock_count = 0;
-         bool                                                        _enable_require_locking = false;
-#endif
    };
 
    template<typename Object, typename... Args>

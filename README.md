@@ -9,13 +9,13 @@
 
 ## Features
 
-  - Supports multiple objects (tables) with multiple indicies (based upon boost::multi_index_container)
-  - State is persistant and shareable among multiple processes
+  - Supports multiple objects (tables) with multiple indices (based upon boost::multi_index_container)
+  - State is persistent and shareable among multiple processes
   - Nested Transactional Writes with ability to undo changes
 
 ## Dependencies
 
-  - C++17
+  - C++20
   - [Boost](http://www.boost.org/)
   - CMake Build Process
   - Supports Linux, Mac OS X  (no Windows Support)
@@ -74,7 +74,7 @@ int main( int argc, char** argv ) {
    db.add_index< book_index >(); /// open or create the book_index
 
 
-   const auto& book_idx = db.get_index<book_index>().indicies();
+   const auto& book_idx = db.get_index<book_index>().indices();
 
    /**
       Returns a const reference to the book, this pointer will remain
@@ -118,13 +118,16 @@ boost::multi_index_container.  This means that two or more threads may read the 
 same time, but all writes must be protected by a mutex.  
 
 Multiple processes may open the same database if care is taken to use interprocess locking on the
-database.  
+database.
+
+When using the `map_mode = mapped_private`, it is not thread-safe to construct a new chainbase instance 
+in one thread while other threads are writing to other chainbase databases.
 
 ## Persistence
 
 By default data is only flushed to disk upon request or when the program exits. So long as the program
 does not crash in the middle of a call to db.modify(), or db.create() the content of the
-database should remain in a consistant state. This means that you should minimize the complexity of the
+database should remain in a consistent state. This means that you should minimize the complexity of the
 lambdas used to create and/or modify state.
 
 If the operating system crashes or the computer loses power, then the database will be left in an undefined
