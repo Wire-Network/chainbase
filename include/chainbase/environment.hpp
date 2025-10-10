@@ -5,7 +5,9 @@
 namespace chainbase {
 
 constexpr size_t header_size = 1024;
-constexpr uint64_t header_id = 0x535953494F444233ULL; //"SYSIODB3" little endian
+// `CHAINB01` reflects changes since `SYSIODB3`.
+// Wire 6.0 is compatible with `CHAINB01`.
+constexpr uint64_t header_id = 0x3130424e49414843ULL; //"CHAINB01" little endian
 
 struct environment  {
    environment() {

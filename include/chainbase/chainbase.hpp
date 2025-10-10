@@ -6,6 +6,7 @@
 #include <boost/interprocess/containers/flat_map.hpp>
 #include <boost/interprocess/containers/deque.hpp>
 #include <boost/interprocess/containers/string.hpp>
+#include <boost/interprocess/containers/vector.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
 #include <boost/interprocess/sync/interprocess_sharable_mutex.hpp>
 #include <boost/interprocess/sync/sharable_lock.hpp>
@@ -29,6 +30,7 @@
 
 #include <chainbase/pinnable_mapped_file.hpp>
 #include <chainbase/shared_cow_string.hpp>
+#include <chainbase/shared_cow_vector.hpp>
 #include <chainbase/chainbase_node_allocator.hpp>
 #include <chainbase/undo_index.hpp>
 
@@ -43,13 +45,13 @@ namespace chainbase {
    using std::vector;
 
    template<typename T>
-   using allocator = bip::allocator<T, pinnable_mapped_file::segment_manager>;
-
-   template<typename T>
-   using node_allocator = chainbase_node_allocator<T, pinnable_mapped_file::segment_manager>;
+   using node_allocator = chainbase_node_allocator<T, segment_manager>;
 
    using shared_string = shared_cow_string;
-
+   
+   template<typename T>
+   using shared_vector = shared_cow_vector<T>;
+   
    typedef boost::interprocess::interprocess_sharable_mutex read_write_mutex;
    typedef boost::interprocess::sharable_lock< read_write_mutex > read_lock;
 
@@ -96,8 +98,8 @@ namespace chainbase {
    namespace chainbase { template<> struct get_index_type<OBJECT_TYPE> { typedef INDEX_TYPE type; }; }
 
    #define CHAINBASE_DEFAULT_CONSTRUCTOR( OBJECT_TYPE ) \
-   template<typename Constructor, typename Allocator> \
-   OBJECT_TYPE( Constructor&& c, Allocator&&  ) { c(*this); }
+   template<typename Constructor> \
+   OBJECT_TYPE( Constructor&& c, constructor_tag ) { c(*this); }
 
    /**
     * The code we want to implement is this:
@@ -161,6 +163,7 @@ namespace chainbase {
          virtual void    undo_all()const = 0;
          virtual uint32_t type_id()const  = 0;
          virtual uint64_t row_count()const = 0;
+         virtual size_t freelist_memory_usage()const = 0;
          virtual const std::string& type_name()const = 0;
          virtual std::pair<uint64_t, uint64_t> undo_stack_revision_range()const = 0;
 
@@ -188,6 +191,7 @@ namespace chainbase {
          virtual void     undo_all() const override {_base.undo_all(); }
          virtual uint32_t type_id()const override { return BaseIndex::value_type::type_id; }
          virtual uint64_t row_count()const override { return _base.indices().size(); }
+         virtual size_t freelist_memory_usage() const override { return _base.freelist_memory_usage(); }
          virtual const std::string& type_name() const override { return BaseIndex_name; }
          virtual std::pair<uint64_t, uint64_t> undo_stack_revision_range()const override { return _base.undo_stack_revision_range(); }
 
@@ -252,8 +256,13 @@ namespace chainbase {
          database(const std::filesystem::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0,
                   bool allow_dirty = false, pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped);
          ~database();
+
          database(database&&) = default;
          database& operator=(database&&) = default;
+
+         database(const database&) = delete;
+         database& operator=(const database&) = delete;
+
          bool is_read_only() const { return _read_only; }
          void flush();
 
@@ -383,17 +392,27 @@ namespace chainbase {
             _index_list.push_back( new_index );
          }
 
-         pinnable_mapped_file::segment_manager* get_segment_manager() {
+         segment_manager* get_segment_manager() {
             return _db_file.get_segment_manager();
          }
 
-         const pinnable_mapped_file::segment_manager* get_segment_manager() const {
+         const segment_manager* get_segment_manager() const {
             return _db_file.get_segment_manager();
          }
 
          size_t get_free_memory()const
          {
             return _db_file.get_segment_manager()->get_free_memory();
+         }
+
+         size_t get_reclaimable_memory() const {
+            size_t ret = 0;
+            for(const unique_ptr<abstract_index>& ai_ptr : _index_map) {
+               if(!ai_ptr)
+                  continue;
+               ret += ai_ptr->freelist_memory_usage();
+            }
+            return ret;
          }
 
          template<typename MultiIndexType>
