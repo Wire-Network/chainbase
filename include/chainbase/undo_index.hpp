@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chainbase/scope_exit.hpp>
 #include <boost/multi_index_container_fwd.hpp>
 #include <boost/intrusive/set.hpp>
 #include <boost/intrusive/avltree.hpp>
@@ -10,6 +11,7 @@
 #include <boost/mp11/list.hpp>
 #include <boost/mp11/algorithm.hpp>
 #include <boost/iterator/transform_iterator.hpp>
+#include <boost/range/iterator_range.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/core/demangle.hpp>
 #include <boost/interprocess/interprocess_fwd.hpp>
@@ -19,19 +21,7 @@
 #include <sstream>
 
 namespace chainbase {
-
-   template<typename F>
-   struct scope_exit {
-    public:
-      scope_exit(F&& f) : _f(f) {}
-      scope_exit(const scope_exit&) = delete;
-      scope_exit& operator=(const scope_exit&) = delete;
-      ~scope_exit() { if(!_canceled) _f(); }
-      void cancel() { _canceled = true; }
-    private:
-      F _f;
-      bool _canceled = false;
-   };
+   struct constructor_tag {};
 
    // Adapts multi_index's idea of keys to intrusive
    template<typename KeyExtractor, typename T>
@@ -43,21 +33,30 @@ namespace chainbase {
    template<typename T>
    struct value_holder {
       template<typename... A>
-      value_holder(A&&... a) : _item(static_cast<A&&>(a)...) {}
+      value_holder(A&&... a) : _item(std::forward<A&&>(a)...) {}
       T _item;
    };
 
    template<class Tag>
-   struct offset_node_base {
+   struct __attribute__((packed, aligned(4))) offset_node_base {
       offset_node_base() = default;
       offset_node_base(const offset_node_base&) {}
       constexpr offset_node_base& operator=(const offset_node_base&) { return *this; }
-      std::ptrdiff_t _parent;
-      std::ptrdiff_t _left;
-      std::ptrdiff_t _right;
-      int _color;
+      int64_t _parent:42;
+      int64_t _left  :42;
+      int64_t _right :42;
+      int64_t _color :2;
    };
 
+   // --------------------------------------------------------------------------------------
+   // Because the pointers are always aligned to an 4 byte boundary
+   // (so the 2 least significant bits are always 0), we store pointer offsets
+   // shifted by two bits, extending our maximum memory support from 2^41 = 2TB
+   // to 2^43 = 8TB.
+   // A concern could be that `1` is a special value meaning `nullptr`. However we could not
+   // get an offset of 4, since `sizeof(offset_node_base) == 16`, so we could not have
+   // difference between two different `node_ptr` be less than 16.
+   // --------------------------------------------------------------------------------------
    template<class Tag>
    struct offset_node_traits {
       using node = offset_node_base<Tag>;
@@ -66,34 +65,47 @@ namespace chainbase {
       using color = int;
       static node_ptr get_parent(const_node_ptr n) {
          if(n->_parent == 1) return nullptr;
-         return (node_ptr)((char*)n + n->_parent);
+         return (node_ptr)((char*)n + (n->_parent << 2));
       }
       static void set_parent(node_ptr n, node_ptr parent) {
          if(parent == nullptr) n->_parent = 1;
-         else n->_parent = (char*)parent - (char*)n;
+         else {
+            int64_t offset = (char*)parent - (char*)n;
+            assert((offset & 0x3) == 0);
+            n->_parent = offset >> 2;
+         }
       }
       static node_ptr get_left(const_node_ptr n) {
          if(n->_left == 1) return nullptr;
-         return (node_ptr)((char*)n + n->_left);
+         return (node_ptr)((char*)n + (n->_left << 2));
       }
       static void set_left(node_ptr n, node_ptr left) {
          if(left == nullptr) n->_left = 1;
-         else n->_left = (char*)left - (char*)n;
+         else {
+            int64_t offset = (char*)left - (char*)n;
+            assert((offset & 0x3) == 0);
+            n->_left = offset >> 2;
+         }
       }
       static node_ptr get_right(const_node_ptr n) {
          if(n->_right == 1) return nullptr;
-         return (node_ptr)((char*)n + n->_right);
+         return (node_ptr)((char*)n + (n->_right << 2));
       }
       static void set_right(node_ptr n, node_ptr right) {
          if(right == nullptr) n->_right = 1;
-         else n->_right = (char*)right - (char*)n;
+         else {
+            int64_t offset = (char*)right - (char*)n;
+            assert((offset & 0x3) == 0);
+            n->_right = offset >> 2;
+         }
       }
       // red-black tree
       static color get_color(node_ptr n) {
          return n->_color;
       }
       static void set_color(node_ptr n, color c) {
-         n->_color = c;
+         if (n->_color != c)
+            n->_color = c;
       }
       static color black() { return 0; }
       static color red() { return 1; }
@@ -103,7 +115,8 @@ namespace chainbase {
          return n->_color;
       }
       static void set_balance(node_ptr n, balance c) {
-         n->_color = c;
+         if (n->_color != c)
+            n->_color = c;
       }
       static balance negative() { return -1; }
       static balance zero() { return 0; }
@@ -257,11 +270,11 @@ namespace chainbase {
          using value_type = T;
          using allocator_type = Allocator;
          template<typename... A>
-         explicit node(A&&... a) : value_holder<T>{static_cast<A&&>(a)...} {}
+         explicit node(A&&... a) : value_holder<T>{std::forward<A&&>(a)...} {}
          const T& item() const { return *this; }
          uint64_t _mtime = 0; // _monotonic_revision when the node was last modified or created.
       };
-      static constexpr int erased_flag = 2; // 0,1,and -1 are used by the tree
+      static constexpr int erased_flag = -2; // 0,1,and -1 are used by the tree
 
       using indices_type = std::tuple<set_impl<node, Indices>...>;
 
@@ -336,6 +349,10 @@ namespace chainbase {
          uint64_t ctime = 0; // _monotonic_revision at the point the undo_state was created
       };
 
+      void preallocate( std::size_t num ) {
+         _allocator.preallocate(num);
+      }
+
       // Exception safety: strong
       template<typename Constructor>
       const value_type& emplace( Constructor&& c ) {
@@ -346,7 +363,7 @@ namespace chainbase {
             v.id = new_id;
             c( v );
          };
-         alloc_traits::construct(_allocator, &*p, constructor, propagate_allocator(_allocator));
+         alloc_traits::construct(_allocator, &*p, constructor, constructor_tag());
          auto guard1 = scope_exit{[&]{ alloc_traits::destroy(_allocator, &*p); }};
          if(!insert_impl<1>(p->_item))
             BOOST_THROW_EXCEPTION( std::logic_error{ "could not insert object, most likely a uniqueness constraint was violated" } );
@@ -392,56 +409,11 @@ namespace chainbase {
             BOOST_THROW_EXCEPTION( std::logic_error{ "could not modify object, most likely a uniqueness constraint was violated" } );
       }
 
-      // Allows testing whether a value has been removed from the undo_index.
-      //
-      // The lifetime of an object removed through a removed_nodes_tracker
-      // does not end before the removed_nodes_tracker is destroyed or invalidated.
-      //
-      // A removed_nodes_tracker is invalidated by the following members of undo_index:
-      // start_undo_session, commit, squash, and undo.
-      class removed_nodes_tracker {
-       public:
-         explicit removed_nodes_tracker(undo_index& idx) : _self(&idx) {}
-         ~removed_nodes_tracker() {
-            _removed_values.clear_and_dispose([this](value_type* obj) { _self->dispose_node(*obj); });
-         }
-         removed_nodes_tracker(const removed_nodes_tracker&) = delete;
-         removed_nodes_tracker& operator=(const removed_nodes_tracker&) = delete;
-         bool is_removed(const value_type& obj) const {
-            return undo_index::get_removed_field(obj) == erased_flag;
-         }
-         // Must be used in place of undo_index::remove
-         void remove(const value_type& obj) {
-            _self->remove(obj, *this);
-         }
-       private:
-         friend class undo_index;
-         void save(value_type& obj) {
-            undo_index::get_removed_field(obj) = erased_flag;
-            _removed_values.push_front(obj);
-         }
-         undo_index* _self;
-         list_base<node, index0_type> _removed_values;
-      };
-      auto track_removed() {
-         return removed_nodes_tracker(*this);
-      }
-
       void remove( const value_type& obj ) noexcept {
          auto& node_ref = const_cast<value_type&>(obj);
          erase_impl(node_ref);
          if(on_remove(node_ref)) {
             dispose_node(node_ref);
-         }
-      }
-
-    private:
-
-      void remove( const value_type& obj, removed_nodes_tracker& tracker ) noexcept {
-         auto& node_ref = const_cast<value_type&>(obj);
-         erase_impl(node_ref);
-         if(on_remove(node_ref)) {
-            tracker.save(node_ref);
          }
       }
 
@@ -511,7 +483,7 @@ namespace chainbase {
          bool _apply = true;
       };
 
-      int64_t revision() const { return _revision; }
+      uint64_t revision() const { return _revision; }
 
       session start_undo_session( bool enabled ) {
          return session{*this, enabled};
@@ -521,28 +493,25 @@ namespace chainbase {
          if( _undo_stack.size() != 0 )
             BOOST_THROW_EXCEPTION( std::logic_error("cannot set revision while there is an existing undo stack") );
 
-         if( revision > std::numeric_limits<int64_t>::max() )
-            BOOST_THROW_EXCEPTION( std::logic_error("revision to set is too high") );
-
-         if( static_cast<int64_t>(revision) < _revision )
+         if( revision < _revision )
             BOOST_THROW_EXCEPTION( std::logic_error("revision cannot decrease") );
 
-         _revision = static_cast<int64_t>(revision);
+         _revision = revision;
       }
 
-      std::pair<int64_t, int64_t> undo_stack_revision_range() const {
+      std::pair<uint64_t, uint64_t> undo_stack_revision_range() const {
          return { _revision - _undo_stack.size(), _revision };
       }
 
       /**
        * Discards all undo history prior to revision
        */
-      void commit( int64_t revision ) noexcept {
+      void commit( uint64_t revision ) noexcept {
          revision = std::min(revision, _revision);
          if (revision == _revision) {
             dispose_undo();
             _undo_stack.clear();
-         } else if( static_cast<uint64_t>(_revision - revision) < _undo_stack.size() ) {
+         } else if( _revision - revision < _undo_stack.size() ) {
             auto iter = _undo_stack.begin() + (_undo_stack.size() - (_revision - revision));
             dispose(get_old_values_end(*iter), get_removed_values_end(*iter));
             _undo_stack.erase(_undo_stack.begin(), iter);
@@ -640,7 +609,7 @@ namespace chainbase {
          // insert all removed_values
          _removed_values.erase_after_and_dispose(_removed_values.before_begin(), get_removed_values_end(undo_info), [this, &undo_info](pointer p) {
             if (p->id < undo_info.old_next_id) {
-               get_removed_field(*p) = 0; // Will be overwritten by tree algorithms, because we're reusing the color.
+               set_removed_field(*p, 0); // Will be overwritten by tree algorithms, because we're reusing the color.
                insert_impl(*p);
             } else {
                dispose_node(*p);
@@ -675,6 +644,10 @@ namespace chainbase {
 
       void compress_last_undo_session() noexcept {
          compress_impl(_undo_stack.back());
+      }
+
+      size_t freelist_memory_usage() const {
+         return _allocator.freelist_memory_usage() + _old_values_allocator.freelist_memory_usage();
       }
 
     private:
@@ -878,7 +851,7 @@ namespace chainbase {
             if ( obj.id >= undo_info.old_next_id ) {
                return true;
             }
-            get_removed_field(obj) = erased_flag;
+            set_removed_field(obj, erased_flag);
 
             _removed_values.push_front(obj);
             return false;
@@ -886,8 +859,11 @@ namespace chainbase {
          return true;
       }
       // Returns the field indicating whether the node has been removed
-      static int& get_removed_field(const value_type& obj) {
+      static int get_removed_field(const value_type& obj) {
          return static_cast<hook<index0_type, Allocator>&>(to_node(obj))._color;
+      }
+      static void set_removed_field(const value_type& obj, int val) {
+         static_cast<hook<index0_type, Allocator>&>(to_node(obj))._color = val;
       }
       using old_alloc_traits = typename std::allocator_traits<Allocator>::template rebind_traits<old_node>;
       indices_type _indices;
@@ -897,7 +873,7 @@ namespace chainbase {
       rebind_alloc_t<Allocator, node> _allocator;
       rebind_alloc_t<Allocator, old_node> _old_values_allocator;
       id_type _next_id = 0;
-      int64_t _revision = 0;
+      uint64_t _revision = 0;
       uint64_t _monotonic_revision = 0;
       uint32_t                        _size_of_value_type = sizeof(node);
       uint32_t                        _size_of_this = sizeof(undo_index);

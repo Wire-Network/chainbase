@@ -5,7 +5,10 @@
 namespace chainbase {
 
 constexpr size_t header_size = 1024;
-constexpr uint64_t header_id = 0x3242444f49534f45ULL; //"SYSIODB2" little endian
+// `CHAINB01` reflects changes since `SYSIODB3`.
+// Wire 5.x is compatible with `CHAINB01`.
+// Wire 6.0 is compatible with `CHAINB02`.
+constexpr uint64_t header_id = 0x3130424e49414843ULL; //"CHAINB01" little endian
 
 struct environment  {
    environment() {
@@ -56,19 +59,20 @@ struct environment  {
    uint8_t reserved[512] = {};
    char compiler[256] = {};
 
-   bool operator==(const environment& other) {
+   bool operator==(const environment& other) const {
       return !memcmp(this, &other, sizeof(environment));
    } 
-   bool operator!=(const environment& other) {
+   bool operator!=(const environment& other) const {
       return !(*this == other);
    }
 } __attribute__ ((packed));
 
 struct db_header  {
-   uint64_t id = header_id;
-   bool dirty = false;
-   environment dbenviron;
-} __attribute__ ((packed));
+   uint64_t               id    = header_id;
+   bool                   dirty = false;
+   bip::offset_ptr<char>  small_size_allocator;
+   environment            dbenviron;
+};
 
 constexpr size_t header_dirty_bit_offset = offsetof(db_header, dirty);
 
